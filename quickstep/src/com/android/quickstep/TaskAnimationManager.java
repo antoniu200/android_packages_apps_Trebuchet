@@ -48,6 +48,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 
 public class TaskAnimationManager implements RecentsAnimationCallbacks.RecentsAnimationListener {
+    private static final int INVALID_TASK_ID = -1;
     public static final boolean ENABLE_SHELL_TRANSITIONS =
             SystemProperties.getBoolean("persist.debug.shell_transit", false);
 
@@ -58,6 +59,7 @@ public class TaskAnimationManager implements RecentsAnimationCallbacks.RecentsAn
     private GestureState mLastGestureState;
     private RemoteAnimationTargetCompat mLastAppearedTaskTarget;
     private Runnable mLiveTileCleanUpHandler;
+    private int mPendingQuickSwitchTaskId = INVALID_TASK_ID;
     private Context mCtx;
 
     private final TaskStackChangeListener mLiveTileRestartListener = new TaskStackChangeListener() {
@@ -152,6 +154,8 @@ public class TaskAnimationManager implements RecentsAnimationCallbacks.RecentsAn
             @Override
             public void onTasksAppeared(RemoteAnimationTargetCompat[] appearedTaskTargets) {
                 RemoteAnimationTargetCompat appearedTaskTarget = appearedTaskTargets[0];
+                RemoteAnimationTargetCompat pendingQuickSwitchTarget =
+                        findPendingQuickSwitchTarget(appearedTaskTargets);
                 BaseActivityInterface activityInterface = mLastGestureState.getActivityInterface();
                 // Convert appTargets to type RemoteAnimationTarget for all apps except Home app
                 RemoteAnimationTarget[] nonHomeApps = Arrays.stream(appearedTaskTargets)
@@ -164,15 +168,23 @@ public class TaskAnimationManager implements RecentsAnimationCallbacks.RecentsAn
                         SystemUiProxy.INSTANCE.getNoCreate()
                                 .onGoingToRecentsLegacy(false, nonHomeApps);
 
-                if (ENABLE_QUICKSTEP_LIVE_TILE.get() && activityInterface.isInLiveTileMode()
+                boolean isQuickSwitchAppearance = pendingQuickSwitchTarget != null;
+                if (ENABLE_QUICKSTEP_LIVE_TILE.get()
+                        && (activityInterface.isInLiveTileMode() || isQuickSwitchAppearance)
                         && activityInterface.getCreatedActivity() != null) {
                     RecentsView recentsView =
                             activityInterface.getCreatedActivity().getOverviewPanel();
                     if (recentsView != null) {
-                        recentsView.launchSideTaskInLiveTileMode(appearedTaskTarget.taskId,
+                        RemoteAnimationTargetCompat taskToLaunch = isQuickSwitchAppearance
+                                ? pendingQuickSwitchTarget
+                                : appearedTaskTarget;
+                        recentsView.launchSideTaskInLiveTileMode(taskToLaunch.taskId,
                                 appearedTaskTargets,
                                 new RemoteAnimationTargetCompat[0] /* wallpaper */,
                                 RemoteAnimationTargetCompat.wrap(nonAppTargets) /* nonApps */);
+                        if (isQuickSwitchAppearance) {
+                            clearPendingQuickSwitchTaskId(taskToLaunch.taskId);
+                        }
                         return;
                     }
                 }
@@ -218,6 +230,32 @@ public class TaskAnimationManager implements RecentsAnimationCallbacks.RecentsAn
                 | STATE_RECENTS_ANIMATION_STARTED);
         gestureState.updateLastAppearedTaskTarget(mLastAppearedTaskTarget);
         return mCallbacks;
+    }
+
+    @UiThread
+    public void setPendingQuickSwitchTaskId(int taskId) {
+        mPendingQuickSwitchTaskId = taskId;
+    }
+
+    @UiThread
+    public void clearPendingQuickSwitchTaskId(int taskId) {
+        if (mPendingQuickSwitchTaskId == taskId) {
+            mPendingQuickSwitchTaskId = INVALID_TASK_ID;
+        }
+    }
+
+    @Nullable
+    private RemoteAnimationTargetCompat findPendingQuickSwitchTarget(
+            RemoteAnimationTargetCompat[] targets) {
+        if (mPendingQuickSwitchTaskId == INVALID_TASK_ID) {
+            return null;
+        }
+        for (RemoteAnimationTargetCompat target : targets) {
+            if (target.taskId == mPendingQuickSwitchTaskId) {
+                return target;
+            }
+        }
+        return null;
     }
 
     public void endLiveTile() {
@@ -281,6 +319,7 @@ public class TaskAnimationManager implements RecentsAnimationCallbacks.RecentsAn
      * Cleans up the recents animation entirely.
      */
     private void cleanUpRecentsAnimation() {
+        mPendingQuickSwitchTaskId = INVALID_TASK_ID;
         if (mLiveTileCleanUpHandler != null) {
             mLiveTileCleanUpHandler.run();
             mLiveTileCleanUpHandler = null;

@@ -137,6 +137,10 @@ public abstract class AbsSwipeUpHandler<T extends StatefulActivity<S>,
         extends SwipeUpAnimationLogic implements OnApplyWindowInsetsListener,
         RecentsAnimationCallbacks.RecentsAnimationListener {
     private static final String TAG = "AbsSwipeUpHandler";
+    enum AnimationInterruptionMode {
+        NEW_GESTURE_HANDLER,
+        RECENTS_BUTTON_QUICK_SWITCH
+    }
 
     private static final String[] STATE_NAMES = DEBUG_STATES ? new String[17] : null;
 
@@ -261,6 +265,7 @@ public abstract class AbsSwipeUpHandler<T extends StatefulActivity<S>,
     // Used to control launcher components throughout the swipe gesture.
     private AnimatorControllerWithResistance mLauncherTransitionController;
     private boolean mHasEndedLauncherTransition;
+    private boolean mQuickSwitchPreempted;
 
     private AnimationFactory mAnimationFactory = (t) -> { };
 
@@ -1516,7 +1521,7 @@ public abstract class AbsSwipeUpHandler<T extends StatefulActivity<S>,
         if (mGestureState.isRecentsAnimationRunning() && mGestureState.getEndTarget() != null
                 && !mGestureState.getEndTarget().isLauncher) {
             // Continued quick switch.
-            cancelCurrentAnimation();
+            interruptCurrentAnimation(AnimationInterruptionMode.NEW_GESTURE_HANDLER);
         } else {
             mStateCallback.setStateOnUiThread(STATE_FINISH_WITH_NO_END);
             reset();
@@ -1576,18 +1581,53 @@ public abstract class AbsSwipeUpHandler<T extends StatefulActivity<S>,
     }
 
     /**
-     * Cancels any running animation so that the active target can be overriden by a new swipe
-     * handler (in case of quick switch).
+     * Interrupts the current animation according to the component that is taking over.
+     *
+     * A new gesture handler takes ownership of the remote app animation, so this handler must stop
+     * driving mCurrentShift and release its gesture callbacks. A second Recents-button toggle is
+     * different: the current handler must keep driving the running app toward Overview while only
+     * the Launcher/Overview side is frozen at its current visual progress.
+     *
+     * @return false only when a Recents-button quick-switch interruption cannot be applied to the
+     *         current transition.
      */
-    private void cancelCurrentAnimation() {
-        mCanceled = true;
-        mCurrentShift.cancelAnimation();
+    @UiThread
+    boolean interruptCurrentAnimation(AnimationInterruptionMode mode) {
+        if (mode == AnimationInterruptionMode.NEW_GESTURE_HANDLER) {
+            mCanceled = true;
+            mCurrentShift.cancelAnimation();
 
-        // Cleanup when switching handlers
-        mInputConsumerProxy.unregisterCallback();
-        mActivityInitListener.unregister();
-        ActivityManagerWrapper.getInstance().unregisterTaskStackListener(mActivityRestartListener);
-        mTaskSnapshot = null;
+            // Cleanup when switching handlers.
+            mInputConsumerProxy.unregisterCallback();
+            mActivityInitListener.unregister();
+            ActivityManagerWrapper.getInstance().unregisterTaskStackListener(
+                    mActivityRestartListener);
+            mTaskSnapshot = null;
+            return true;
+        }
+
+        if (mHasEndedLauncherTransition || mLauncherTransitionController == null
+                || mGestureState.getEndTarget() != RECENTS) {
+            return false;
+        }
+
+        // End only Launcher's playback controller. Keep mCurrentShift running so the original app
+        // leash continues toward Overview. Suppress the normal end action because it would commit
+        // StateManager to an endpoint and reapply state handlers, destroying the frozen geometry.
+        mHasEndedLauncherTransition = true;
+        mQuickSwitchPreempted = true;
+        AnimatorPlaybackController controller =
+                mLauncherTransitionController.getNormalController();
+        controller.setEndAction(null);
+        controller.dispatchSetInterpolator(
+                t -> Utilities.boundToRange(mCurrentShift.value, 0, 1));
+        controller.getAnimationPlayer().end();
+        mLauncherTransitionController = null;
+
+        if (mRecentsView != null) {
+            mRecentsView.abortScrollerAnimation();
+        }
+        return true;
     }
 
     private void invalidateHandler() {
@@ -1923,6 +1963,17 @@ public abstract class AbsSwipeUpHandler<T extends StatefulActivity<S>,
         mRecentsAnimationTargets = null;
         if (mRecentsView != null) {
             mRecentsView.setRecentsAnimationTargets(null, null);
+        }
+
+        // If the side-task launch finishes the Recents animation before the old settle animation
+        // can invalidate this preempted handler, its settle-success callback exits early because
+        // mRecentsAnimationController is already null. Explicitly invalidate in that race so no
+        // input/listener state is left behind.
+        if (mQuickSwitchPreempted) {
+            mQuickSwitchPreempted = false;
+            if (!mStateCallback.hasStates(STATE_HANDLER_INVALIDATED)) {
+                reset();
+            }
         }
     }
 

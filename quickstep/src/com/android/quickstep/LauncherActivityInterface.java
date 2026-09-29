@@ -26,6 +26,7 @@ import static com.android.launcher3.util.Executors.MAIN_EXECUTOR;
 
 import android.animation.Animator;
 import android.animation.AnimatorSet;
+import android.animation.ValueAnimator;
 import android.content.Context;
 import android.graphics.Rect;
 import android.view.MotionEvent;
@@ -38,9 +39,11 @@ import com.android.launcher3.DeviceProfile;
 import com.android.launcher3.Launcher;
 import com.android.launcher3.LauncherInitListener;
 import com.android.launcher3.LauncherState;
+import com.android.launcher3.anim.AnimatorPlaybackController;
 import com.android.launcher3.anim.PendingAnimation;
 import com.android.launcher3.statehandlers.DepthController;
 import com.android.launcher3.statehandlers.DepthController.ClampedDepthProperty;
+import com.android.launcher3.states.StateAnimationConfig;
 import com.android.launcher3.statemanager.StateManager;
 import com.android.launcher3.taskbar.LauncherTaskbarUIController;
 import com.android.launcher3.touch.PagedOrientationHandler;
@@ -63,6 +66,9 @@ public final class LauncherActivityInterface extends
         BaseActivityInterface<LauncherState, BaseQuickstepLauncher> {
 
     public static final LauncherActivityInterface INSTANCE = new LauncherActivityInterface();
+
+    @Nullable
+    private AnimatorPlaybackController mHomeToOverviewController;
 
     private LauncherActivityInterface() {
         super(true, OVERVIEW, BACKGROUND_APP);
@@ -218,10 +224,70 @@ public final class LauncherActivityInterface extends
             }
         }
 
+        StateManager<LauncherState> stateManager = launcher.getStateManager();
+        boolean shouldAnimate = stateManager.shouldAnimateStateChange();
         closeOverlay();
-        launcher.getStateManager().goToState(OVERVIEW,
-                launcher.getStateManager().shouldAnimateStateChange(),
-                onCompleteCallback == null ? null : forEndCallback(onCompleteCallback));
+
+        // The Recents-button transition from Home needs to remain interruptible so that a second
+        // Recents press can launch a task from the exact in-flight Overview geometry. Use the same
+        // state handlers and atomic-animation preparation as StateManager.goToState(), but drive
+        // them through a playback controller which LauncherActivityInterface can stop in place.
+        boolean useControlledHomeTransition = shouldAnimate
+                && ValueAnimator.areAnimatorsEnabled()
+                && stateManager.getState() == NORMAL
+                && !stateManager.isInTransition();
+        if (useControlledHomeTransition) {
+            StateAnimationConfig config = new StateAnimationConfig();
+            config.duration = OVERVIEW.getTransitionDuration(launcher);
+            stateManager.prepareForAtomicAnimation(NORMAL, OVERVIEW, config);
+
+            AnimatorPlaybackController controller =
+                    stateManager.createAnimationToNewWorkspace(OVERVIEW, config);
+            mHomeToOverviewController = controller;
+            controller.getTarget().addListener(forEndCallback(() -> {
+                if (mHomeToOverviewController == controller) {
+                    mHomeToOverviewController = null;
+                }
+                if (onCompleteCallback != null) {
+                    onCompleteCallback.run();
+                }
+            }));
+
+            controller.dispatchOnStart();
+            controller.start();
+        } else {
+            stateManager.goToState(OVERVIEW, shouldAnimate,
+                    onCompleteCallback == null ? null : forEndCallback(onCompleteCallback));
+        }
+        return true;
+    }
+
+    @UiThread
+    boolean isHomeToOverviewTransitionActive() {
+        Launcher launcher = getCreatedActivity();
+        return mHomeToOverviewController != null
+                && launcher != null
+                && launcher.getStateManager().isInTransition()
+                && launcher.getStateManager().getState() == OVERVIEW;
+    }
+
+    /**
+     * Ends the controlled Home-to-Overview transition without advancing its visual properties.
+     * The target animation's end listeners still run, so StateManager commits stable OVERVIEW and
+     * clears ownership before the replacement Recents-button command launches its task.
+     */
+    @UiThread
+    boolean interruptHomeToOverviewTransition() {
+        AnimatorPlaybackController controller = mHomeToOverviewController;
+        if (controller == null) {
+            return false;
+        }
+
+        // Cancelling only the playback player leaves all child properties at their exact current
+        // values. Dispatching the target end listeners then commits the logical OVERVIEW state and
+        // clears StateManager's animation ownership without forcing those properties to fraction 1.
+        controller.getAnimationPlayer().cancel();
+        controller.dispatchOnEnd();
         return true;
     }
 

@@ -97,11 +97,83 @@ public class OverviewCommandHelper {
 
     @UiThread
     private void addCommand(CommandInfo cmd) {
+        if (tryPreemptOverviewTransition(cmd)) {
+            return;
+        }
+
         boolean wasEmpty = mPendingCommands.isEmpty();
         mPendingCommands.add(cmd);
         if (wasEmpty) {
             executeNext();
         }
+    }
+
+    /**
+     * Replaces an in-flight Recents-button toggle with a second toggle, without waiting for the
+     * first app-to-Overview transition to settle. The original swipe handler keeps ownership of
+     * the running app animation, while Launcher/Overview is frozen at its current visual progress.
+     *
+     * The replacement command carries the already-created RecentsView because StateManager still
+     * considers Launcher to be in its background-app state at this point. executeCommand() can then
+     * follow its normal TYPE_TOGGLE path without pretending that Overview has fully settled.
+     */
+    @UiThread
+    private boolean tryPreemptOverviewTransition(CommandInfo cmd) {
+        if (cmd.type != TYPE_TOGGLE || mPendingCommands.size() != 1) {
+            return false;
+        }
+
+        CommandInfo activeCommand = mPendingCommands.get(0);
+        if (activeCommand.type != TYPE_TOGGLE) {
+            return false;
+        }
+
+        BaseActivityInterface<?, ?> activityInterface =
+                mOverviewComponentObserver.getActivityInterface();
+        StatefulActivity<?> activity = activityInterface.getCreatedActivity();
+        if (activeCommand.mActiveHandler == null) {
+            if (activityInterface instanceof LauncherActivityInterface) {
+                LauncherActivityInterface launcherActivityInterface =
+                        (LauncherActivityInterface) activityInterface;
+                if (launcherActivityInterface.isHomeToOverviewTransitionActive()) {
+                    RecentsView recents = activity == null ? null : activity.getOverviewPanel();
+                    if (recents == null) {
+                        return false;
+                    }
+
+                    // Replace the queue head before ending the first command's state animation.
+                    // Its existing completion callback can then run normally, but its
+                    // scheduleNextTask() call sees that it no longer owns the queue head.
+                    mPendingCommands.set(0, cmd);
+                    if (!launcherActivityInterface.interruptHomeToOverviewTransition()) {
+                        mPendingCommands.set(0, activeCommand);
+                        return false;
+                    }
+
+                    executeNext();
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        if (!mTaskAnimationManager.isRecentsAnimationRunning()) {
+            return false;
+        }
+
+        RecentsView recents = activity == null ? null : activity.getOverviewPanel();
+        if (recents == null || !activeCommand.mActiveHandler.interruptCurrentAnimation(
+                AbsSwipeUpHandler.AnimationInterruptionMode.RECENTS_BUTTON_QUICK_SWITCH)) {
+            return false;
+        }
+
+        // Replace the queue head rather than enqueueing behind it. The old handler intentionally
+        // remains alive to finish the running-app animation. Its eventual scheduleNextTask() call
+        // is harmless because the old command is no longer the queue head.
+        cmd.mPreemptedRecentsView = recents;
+        mPendingCommands.set(0, cmd);
+        executeNext();
+        return true;
     }
 
     /**
@@ -153,7 +225,12 @@ public class OverviewCommandHelper {
     private <T extends StatefulActivity<?>> boolean executeCommand(CommandInfo cmd) {
         BaseActivityInterface<?, T> activityInterface =
                 mOverviewComponentObserver.getActivityInterface();
-        RecentsView recents = activityInterface.getVisibleRecentsView();
+        boolean usingPreemptedRecents = cmd.mPreemptedRecentsView != null;
+        RecentsView recents = cmd.mPreemptedRecentsView;
+        cmd.mPreemptedRecentsView = null;
+        if (recents == null) {
+            recents = activityInterface.getVisibleRecentsView();
+        }
         if (recents == null) {
             if (cmd.type == TYPE_HIDE) {
                 // already hidden
@@ -176,8 +253,19 @@ public class OverviewCommandHelper {
                             : null;
                     return launchTask(recents, tv, cmd);
                 }
-                case TYPE_TOGGLE:
-                    return launchTask(recents, getNextTask(recents), cmd);
+                case TYPE_TOGGLE: {
+                    TaskView nextTask = getNextTask(recents);
+                    int quickSwitchTaskId = -1;
+                    if (usingPreemptedRecents && nextTask != null && nextTask.getTask() != null) {
+                        quickSwitchTaskId = nextTask.getTask().key.id;
+                        mTaskAnimationManager.setPendingQuickSwitchTaskId(quickSwitchTaskId);
+                    }
+                    boolean canExecuteNext = launchTask(recents, nextTask, cmd);
+                    if (canExecuteNext && quickSwitchTaskId != -1) {
+                        mTaskAnimationManager.clearPendingQuickSwitchTaskId(quickSwitchTaskId);
+                    }
+                    return canExecuteNext;
+                }
                 case TYPE_HOME:
                     recents.startHome();
                     LauncherSplitScreenListener.INSTANCE.getNoCreate().notifySwipingToHome();
@@ -201,6 +289,7 @@ public class OverviewCommandHelper {
         gestureState.setHandlingAtomicEvent(true);
         AbsSwipeUpHandler interactionHandler = mService.getSwipeUpHandlerFactory()
                 .newHandler(gestureState, cmd.createTime);
+        cmd.mActiveHandler = interactionHandler;
         interactionHandler.setGestureEndCallback(
                 () -> onTransitionComplete(cmd, interactionHandler));
         interactionHandler.initWhenReady();
@@ -249,6 +338,7 @@ public class OverviewCommandHelper {
 
     private void onTransitionComplete(CommandInfo cmd, AbsSwipeUpHandler handler) {
         cmd.removeListener(handler);
+        cmd.mActiveHandler = null;
         Trace.endAsyncSection(TRANSITION_NAME, 0);
 
         if (cmd.type == TYPE_SHOW_NEXT_FOCUS) {
@@ -284,6 +374,8 @@ public class OverviewCommandHelper {
         public final long createTime = SystemClock.elapsedRealtime();
         public final int type;
         RecentsAnimationCallbacks mActiveCallbacks;
+        AbsSwipeUpHandler<?, ?, ?> mActiveHandler;
+        RecentsView mPreemptedRecentsView;
 
         CommandInfo(int type) {
             this.type = type;
