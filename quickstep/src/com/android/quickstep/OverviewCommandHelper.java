@@ -255,6 +255,16 @@ public class OverviewCommandHelper {
                 }
                 case TYPE_TOGGLE: {
                     TaskView nextTask = getNextTask(recents);
+                    TaskView runningTask = recents.getRunningTaskView();
+                    if (nextTask != null && nextTask == runningTask) {
+                        nextTask.setEndQuickswitchCuj(true);
+                        RunnableList callbackList = nextTask.launchRunningTaskAnimated();
+                        if (callbackList != null) {
+                            callbackList.add(() -> scheduleNextTask(cmd));
+                            return false;
+                        }
+                    }
+
                     int quickSwitchTaskId = -1;
                     if (usingPreemptedRecents && nextTask != null && nextTask.getTask() != null) {
                         quickSwitchTaskId = nextTask.getTask().key.id;

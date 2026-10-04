@@ -1541,6 +1541,28 @@ public class Launcher extends StatefulActivity<LauncherState> implements Launche
         Object traceToken = TraceHelper.INSTANCE.beginSection(ON_NEW_INTENT_EVT);
         super.onNewIntent(intent);
 
+        // A Home press that arrives while the app is still closing into its launcher icon must not
+        // touch the launcher yet: handling it now would close the floating-icon ListenerView, which
+        // fast-finishes the close animation (freezing the app window) and also makes
+        // shouldMoveToDefaultScreen false. Queue it until the animation is done and handle it then.
+        if (Intent.ACTION_MAIN.equals(intent.getAction())
+                && runAfterHomeCloseAnimation(() -> {
+                    if (!isDestroyed()) {
+                        onNewIntent(intent);
+                    }
+                })) {
+            // The Hotseat is the same on every page, so when the app is closing into a Hotseat icon
+            // the workspace can already go to the first page without touching the animation.
+            boolean broughtToFront = (intent.getFlags() & Intent.FLAG_ACTIVITY_BROUGHT_TO_FRONT)
+                    == Intent.FLAG_ACTIVITY_BROUGHT_TO_FRONT;
+            if (!broughtToFront && isHomeCloseAnimationTargetingHotseat()
+                    && isInState(NORMAL) && !mWorkspace.isHandlingTouch()) {
+                mWorkspace.post(mWorkspace::moveToDefaultScreen);
+            }
+            TraceHelper.INSTANCE.endSection(traceToken);
+            return;
+        }
+
         boolean alreadyOnHome = hasWindowFocus() && ((intent.getFlags() &
                 Intent.FLAG_ACTIVITY_BROUGHT_TO_FRONT)
                 != Intent.FLAG_ACTIVITY_BROUGHT_TO_FRONT);
@@ -1582,6 +1604,20 @@ public class Launcher extends StatefulActivity<LauncherState> implements Launche
         }
 
         TraceHelper.INSTANCE.endSection(traceToken);
+    }
+
+    /**
+     * If an app-close-to-home animation is currently running, remembers {@code task} (replacing any
+     * previously queued one, so only the latest Home press is kept), runs it once the animation has
+     * finished and returns true. Otherwise does nothing and returns false.
+     */
+    protected boolean runAfterHomeCloseAnimation(Runnable task) {
+        return false;
+    }
+
+    /** Whether a running app-close-to-home animation is flying into a Hotseat icon. */
+    protected boolean isHomeCloseAnimationTargetingHotseat() {
+        return false;
     }
 
     protected void showAllAppsFromIntent(boolean alreadyOnHome) {

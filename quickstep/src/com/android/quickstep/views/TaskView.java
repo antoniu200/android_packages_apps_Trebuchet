@@ -608,71 +608,101 @@ public class TaskView extends FrameLayout implements Reusable {
         RecentsView recentsView = getRecentsView();
         RemoteTargetHandle[] remoteTargetHandles = recentsView.mRemoteTargetHandles;
         if (ENABLE_QUICKSTEP_LIVE_TILE.get() && isRunningTask() && remoteTargetHandles != null) {
-            if (!mIsClickableAsLiveTile) {
+            if (!launchRunningTaskAnimated(null /* callbackList */)) {
                 return;
             }
-
-            // Reset the minimized state since we force-toggled the minimized state when entering
-            // overview, but never actually finished the recents animation
-            SystemUiProxy p = SystemUiProxy.INSTANCE.getNoCreate();
-            if (p != null) {
-                p.setSplitScreenMinimized(false);
-            }
-
-            mIsClickableAsLiveTile = false;
-            RemoteAnimationTargets targets;
-            if (remoteTargetHandles.length == 1) {
-                targets = remoteTargetHandles[0].getTransformParams().getTargetSet();
-            } else {
-                TransformParams topLeftParams = remoteTargetHandles[0].getTransformParams();
-                TransformParams rightBottomParams = remoteTargetHandles[1].getTransformParams();
-                RemoteAnimationTargetCompat[] apps = Stream.concat(
-                        Arrays.stream(topLeftParams.getTargetSet().apps),
-                        Arrays.stream(rightBottomParams.getTargetSet().apps))
-                        .toArray(RemoteAnimationTargetCompat[]::new);
-                RemoteAnimationTargetCompat[] wallpapers = Stream.concat(
-                        Arrays.stream(topLeftParams.getTargetSet().wallpapers),
-                        Arrays.stream(rightBottomParams.getTargetSet().wallpapers))
-                        .toArray(RemoteAnimationTargetCompat[]::new);
-                targets = new RemoteAnimationTargets(apps, wallpapers,
-                        topLeftParams.getTargetSet().nonApps,
-                        topLeftParams.getTargetSet().targetMode);
-            }
-            if (targets == null) {
-                // If the recents animation is cancelled somehow between the parent if block and
-                // here, try to launch the task as a non live tile task.
-                launchTaskAnimated();
-                return;
-            }
-
-            AnimatorSet anim = new AnimatorSet();
-            TaskViewUtils.composeRecentsLaunchAnimator(
-                    anim, this, targets.apps,
-                    targets.wallpapers, targets.nonApps, true /* launcherClosing */,
-                    mActivity.getStateManager(), recentsView,
-                    recentsView.getDepthController());
-            anim.addListener(new AnimatorListenerAdapter() {
-                @Override
-                public void onAnimationStart(Animator animation) {
-                    recentsView.runActionOnRemoteHandles(
-                            (Consumer<RemoteTargetHandle>) remoteTargetHandle ->
-                                    remoteTargetHandle
-                                            .getTaskViewSimulator()
-                                            .setDrawsBelowRecents(false));
-                }
-
-                @Override
-                public void onAnimationEnd(Animator animator) {
-                    mIsClickableAsLiveTile = true;
-                }
-            });
-            anim.start();
-            recentsView.onTaskLaunchedInLiveTileMode();
         } else {
             launchTaskAnimated();
         }
         mActivity.getStatsLogManager().logger().withItemInfo(getItemInfo())
                 .log(LAUNCHER_TASK_LAUNCH_TAP);
+    }
+
+    /**
+     * Animates the currently running live tile back to the app without relaunching the task.
+     *
+     * @return a callback which completes after the recents animation is finished, or {@code null}
+     *         if the running live tile cannot be launched.
+     */
+    @Nullable
+    public RunnableList launchRunningTaskAnimated() {
+        RunnableList callbackList = new RunnableList();
+        return launchRunningTaskAnimated(callbackList) ? callbackList : null;
+    }
+
+    private boolean launchRunningTaskAnimated(@Nullable RunnableList callbackList) {
+        RecentsView recentsView = getRecentsView();
+        RemoteTargetHandle[] remoteTargetHandles = recentsView.mRemoteTargetHandles;
+        if (!ENABLE_QUICKSTEP_LIVE_TILE.get() || !isRunningTask()
+                || remoteTargetHandles == null || !mIsClickableAsLiveTile) {
+            return false;
+        }
+
+        // Reset the minimized state since we force-toggled the minimized state when entering
+        // overview, but never actually finished the recents animation.
+        SystemUiProxy p = SystemUiProxy.INSTANCE.getNoCreate();
+        if (p != null) {
+            p.setSplitScreenMinimized(false);
+        }
+
+        mIsClickableAsLiveTile = false;
+        RemoteAnimationTargets targets;
+        if (remoteTargetHandles.length == 1) {
+            targets = remoteTargetHandles[0].getTransformParams().getTargetSet();
+        } else {
+            TransformParams topLeftParams = remoteTargetHandles[0].getTransformParams();
+            TransformParams rightBottomParams = remoteTargetHandles[1].getTransformParams();
+            RemoteAnimationTargetCompat[] apps = Stream.concat(
+                    Arrays.stream(topLeftParams.getTargetSet().apps),
+                    Arrays.stream(rightBottomParams.getTargetSet().apps))
+                    .toArray(RemoteAnimationTargetCompat[]::new);
+            RemoteAnimationTargetCompat[] wallpapers = Stream.concat(
+                    Arrays.stream(topLeftParams.getTargetSet().wallpapers),
+                    Arrays.stream(rightBottomParams.getTargetSet().wallpapers))
+                    .toArray(RemoteAnimationTargetCompat[]::new);
+            targets = new RemoteAnimationTargets(apps, wallpapers,
+                    topLeftParams.getTargetSet().nonApps,
+                    topLeftParams.getTargetSet().targetMode);
+        }
+        if (targets == null) {
+            // If the recents animation is cancelled somehow between the parent if block and here,
+            // try to launch the task as a non live tile task.
+            mIsClickableAsLiveTile = true;
+            RunnableList fallbackCallbackList = launchTaskAnimated();
+            if (callbackList != null && fallbackCallbackList != null) {
+                fallbackCallbackList.add(callbackList::executeAllAndDestroy);
+            }
+            return fallbackCallbackList != null;
+        }
+
+        if (callbackList != null) {
+            recentsView.addSideTaskLaunchCallback(callbackList);
+        }
+
+        AnimatorSet anim = new AnimatorSet();
+        TaskViewUtils.composeRecentsLaunchAnimator(
+                anim, this, targets.apps,
+                targets.wallpapers, targets.nonApps, true /* launcherClosing */,
+                mActivity.getStateManager(), recentsView,
+                recentsView.getDepthController());
+        anim.addListener(new AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationStart(Animator animation) {
+                recentsView.runActionOnRemoteHandles(
+                        (Consumer<RemoteTargetHandle>) remoteTargetHandle ->
+                                remoteTargetHandle
+                                        .getTaskViewSimulator()
+                                        .setDrawsBelowRecents(false));
+            }
+
+            @Override
+            public void onAnimationEnd(Animator animator) {
+                mIsClickableAsLiveTile = true;
+            }
+        });
+        anim.start();
+        recentsView.onTaskLaunchedInLiveTileMode();
+        return true;
     }
 
     /**

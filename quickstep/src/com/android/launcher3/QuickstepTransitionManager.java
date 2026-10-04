@@ -82,6 +82,7 @@ import android.util.Pair;
 import android.util.Size;
 import android.view.SurfaceControl;
 import android.view.View;
+import android.view.ViewParent;
 import android.view.ViewRootImpl;
 import android.view.ViewTreeObserver;
 import android.view.animation.AnimationUtils;
@@ -197,6 +198,13 @@ public class QuickstepTransitionManager implements OnDeviceProfileChangeListener
     private final AlphaProperty mDragLayerAlpha;
 
     final Handler mHandler;
+
+    /** True while the app-close-to-home (wallpaper open) animation is playing. */
+    private boolean mIsHomeCloseAnimationRunning;
+    /** True if the running close-to-home animation flies the app into a Hotseat icon. */
+    private boolean mHomeCloseAnimationTargetsHotseat;
+    /** Work queued by {@link #runAfterHomeCloseAnimation} to run after that animation ends. */
+    private Runnable mAfterHomeCloseAnimation;
 
     private final float mContentScale;
     private final float mClosingWindowTransY;
@@ -1576,6 +1584,7 @@ public class QuickstepTransitionManager implements OnDeviceProfileChangeListener
             }
 
             AnimatorSet anim = null;
+            boolean targetsHotseat = false;
             RemoteAnimationProvider provider = mRemoteAnimationProvider;
             if (provider != null) {
                 anim = provider.createWindowAnimation(appTargets, wallpaperTargets);
@@ -1603,6 +1612,7 @@ public class QuickstepTransitionManager implements OnDeviceProfileChangeListener
                             .getDimension(R.dimen.unlock_staggered_velocity_dp_per_s);
                     PointF velocity = new PointF(0, -velocityPxPerS);
                     getClosingWindowAnimators(anim, appTargets, launcherView, velocity);
+                    targetsHotseat = isInHotseat(launcherView);
                     if (!mLauncher.isInState(LauncherState.ALL_APPS)) {
                         anim.play(new StaggeredWorkspaceAnim(mLauncher, velocity.y,
                                 true /* animateOverviewScrim */, launcherView).getAnimators());
@@ -1651,7 +1661,68 @@ public class QuickstepTransitionManager implements OnDeviceProfileChangeListener
             }
 
             mLauncher.clearForceInvisibleFlag(INVISIBLE_ALL);
+            if (!mFromUnlock) {
+                final boolean closingToHotseat = targetsHotseat;
+                anim.addListener(new AnimatorListenerAdapter() {
+                    @Override
+                    public void onAnimationStart(Animator animation) {
+                        mIsHomeCloseAnimationRunning = true;
+                        mHomeCloseAnimationTargetsHotseat = closingToHotseat;
+                    }
+
+                    @Override
+                    public void onAnimationEnd(Animator animation) {
+                        onHomeCloseAnimationEnd();
+                    }
+                });
+            }
             result.setAnimation(anim, mLauncher);
+        }
+    }
+
+    /**
+     * If the app-close-to-home animation is running, queues {@code task} to run once it has ended
+     * and returns true. Only the latest queued task is kept. Returns false (and does nothing)
+     * if no such animation is running.
+     */
+    public boolean runAfterHomeCloseAnimation(Runnable task) {
+        if (!mIsHomeCloseAnimationRunning) {
+            return false;
+        }
+        mAfterHomeCloseAnimation = task;
+        return true;
+    }
+
+    /**
+     * Returns true while a close-to-home animation is running whose target icon is in the Hotseat.
+     * The Hotseat is the same on every workspace page, so the workspace can change page under this
+     * animation without affecting it.
+     */
+    public boolean isHomeCloseAnimationTargetingHotseat() {
+        return mIsHomeCloseAnimationRunning && mHomeCloseAnimationTargetsHotseat;
+    }
+
+    private static boolean isInHotseat(@Nullable View view) {
+        if (view == null) {
+            return false;
+        }
+        for (ViewParent parent = view.getParent(); parent != null; parent = parent.getParent()) {
+            if (parent instanceof Hotseat) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void onHomeCloseAnimationEnd() {
+        mIsHomeCloseAnimationRunning = false;
+        mHomeCloseAnimationTargetsHotseat = false;
+        Runnable task = mAfterHomeCloseAnimation;
+        mAfterHomeCloseAnimation = null;
+        if (task != null) {
+            // Post so it runs after the remaining end listeners (including finishing the remote
+            // animation) have completed.
+            mHandler.post(task);
         }
     }
 

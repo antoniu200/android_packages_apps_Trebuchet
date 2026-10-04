@@ -78,7 +78,7 @@ public abstract class PagedView<T extends View & PageIndicator> extends ViewGrou
     public static final int INVALID_PAGE = -1;
     protected static final ComputePageScrollsLogic SIMPLE_SCROLL_LOGIC = (v) -> v.getVisibility() != GONE;
 
-    public static final int PAGE_SNAP_ANIMATION_DURATION = 750;
+    public static final int PAGE_SNAP_ANIMATION_DURATION = 500;
 
     private static final float RETURN_TO_ORIGINAL_PAGE_THRESHOLD = 0.33f;
     // The page is moved more than halfway, automatically move to the next page on touch up.

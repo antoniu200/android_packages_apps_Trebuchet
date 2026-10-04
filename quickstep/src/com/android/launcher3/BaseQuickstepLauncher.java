@@ -177,6 +177,18 @@ public abstract class BaseQuickstepLauncher extends Launcher
         }
     }
 
+    @Override
+    protected boolean runAfterHomeCloseAnimation(Runnable task) {
+        return mAppTransitionManager != null
+                && mAppTransitionManager.runAfterHomeCloseAnimation(task);
+    }
+
+    @Override
+    protected boolean isHomeCloseAnimationTargetingHotseat() {
+        return mAppTransitionManager != null
+                && mAppTransitionManager.isHomeCloseAnimationTargetingHotseat();
+    }
+
     public QuickstepTransitionManager getAppTransitionManager() {
         return mAppTransitionManager;
     }
