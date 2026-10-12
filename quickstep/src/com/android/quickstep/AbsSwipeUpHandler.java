@@ -1144,7 +1144,13 @@ public abstract class AbsSwipeUpHandler<T extends StatefulActivity<S>,
             if (mRecentsView != null) {
                 int nearestPage = mRecentsView.getDestinationPage();
                 boolean isScrolling = false;
-                if (mRecentsView.getNextPage() != nearestPage) {
+                // A command from the nav bar buttons (e.g. the 3-button Recents key) ends the
+                // gesture right when the recents animation starts, with no finger drag, so there
+                // is no user scroll to settle. The scroll position can still be stale at that
+                // moment (the task list was just rebuilt and RecentsView has not been laid out
+                // yet), and snapping to the page it points at would land on the wrong card.
+                if (!mGestureState.isHandlingAtomicEvent()
+                        && mRecentsView.getNextPage() != nearestPage) {
                     // We shouldn't really scroll to the next page when swiping up to recents.
                     // Only allow settling on the next page if it's nearest to the center.
                     mRecentsView.snapToPage(nearestPage, Math.toIntExact(duration));
