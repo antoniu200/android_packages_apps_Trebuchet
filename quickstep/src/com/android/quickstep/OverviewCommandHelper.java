@@ -101,6 +101,14 @@ public class OverviewCommandHelper {
             return;
         }
 
+        if (cmd.type == TYPE_TOGGLE && !mPendingCommands.isEmpty()) {
+            // A Recents-button press that can't preempt the running transition is dropped rather
+            // than queued. Each queued toggle flips Overview open/closed once the previous
+            // transition ends, so mis-pressed presses would otherwise fire late, e.g. bringing
+            // Overview back after the user has already returned to the app.
+            return;
+        }
+
         boolean wasEmpty = mPendingCommands.isEmpty();
         mPendingCommands.add(cmd);
         if (wasEmpty) {
