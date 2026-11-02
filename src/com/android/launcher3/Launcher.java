@@ -372,6 +372,12 @@ public class Launcher extends StatefulActivity<LauncherState> implements Launche
     protected long mLastTouchUpTime = -1;
     private boolean mTouchInProgress;
 
+    /**
+     * True from the moment a Home press was queued behind the app-close animation and the workspace
+     * was moved to its first page right away, until the queued press has been replayed.
+     */
+    private boolean mHomeMovedWhileQueued;
+
     private SafeCloseable mUserChangedCallbackCloseable;
 
     // New InstanceId is assigned to mAllAppsSessionLogId for each AllApps sessions.
@@ -1550,13 +1556,15 @@ public class Launcher extends StatefulActivity<LauncherState> implements Launche
                     if (!isDestroyed()) {
                         onNewIntent(intent);
                     }
+                    mHomeMovedWhileQueued = false;
                 })) {
-            // The Hotseat is the same on every page, so when the app is closing into a Hotseat icon
-            // the workspace can already go to the first page without touching the animation.
+            // The workspace goes to the first page right away. The closing animation rides along
+            // with the page that holds its icon (see QuickstepTransitionManager.PageRide), so it
+            // isn't disturbed. The queued press replayed afterwards then finds nothing left to move.
             boolean broughtToFront = (intent.getFlags() & Intent.FLAG_ACTIVITY_BROUGHT_TO_FRONT)
                     == Intent.FLAG_ACTIVITY_BROUGHT_TO_FRONT;
-            if (!broughtToFront && isHomeCloseAnimationTargetingHotseat()
-                    && isInState(NORMAL) && !mWorkspace.isHandlingTouch()) {
+            if (!broughtToFront && isInState(NORMAL) && !mWorkspace.isHandlingTouch()) {
+                mHomeMovedWhileQueued = true;
                 mWorkspace.post(mWorkspace::moveToDefaultScreen);
             }
             TraceHelper.INSTANCE.endSection(traceToken);
@@ -1589,7 +1597,10 @@ public class Launcher extends StatefulActivity<LauncherState> implements Launche
                     mAppsView.reset(isStarted() /* animate */);
                 }
 
-                if (shouldMoveToDefaultScreen && !mWorkspace.isHandlingTouch()) {
+                // Skipped when the page was already moved while this press was queued, so the
+                // replay doesn't move it a second time (e.g. back from a page swiped to since).
+                if (shouldMoveToDefaultScreen && !mHomeMovedWhileQueued
+                        && !mWorkspace.isHandlingTouch()) {
                     mWorkspace.post(mWorkspace::moveToDefaultScreen);
                 }
             }
@@ -1612,11 +1623,6 @@ public class Launcher extends StatefulActivity<LauncherState> implements Launche
      * finished and returns true. Otherwise does nothing and returns false.
      */
     protected boolean runAfterHomeCloseAnimation(Runnable task) {
-        return false;
-    }
-
-    /** Whether a running app-close-to-home animation is flying into a Hotseat icon. */
-    protected boolean isHomeCloseAnimationTargetingHotseat() {
         return false;
     }
 

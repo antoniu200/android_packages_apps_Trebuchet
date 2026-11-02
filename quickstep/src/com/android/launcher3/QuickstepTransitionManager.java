@@ -201,8 +201,6 @@ public class QuickstepTransitionManager implements OnDeviceProfileChangeListener
 
     /** True while the app-close-to-home (wallpaper open) animation is playing. */
     private boolean mIsHomeCloseAnimationRunning;
-    /** True if the running close-to-home animation flies the app into a Hotseat icon. */
-    private boolean mHomeCloseAnimationTargetsHotseat;
     /** Work queued by {@link #runAfterHomeCloseAnimation} to run after that animation ends. */
     private Runnable mAfterHomeCloseAnimation;
 
@@ -1361,6 +1359,10 @@ public class QuickstepTransitionManager implements OnDeviceProfileChangeListener
             targetRect.set(getDefaultWindowTargetRect());
         }
 
+        // Lets the whole animation move sideways with the workspace page that holds the icon, e.g.
+        // when a second Home press snaps the workspace back to the first page.
+        final PageRide pageRide = new PageRide(mLauncher, launcherView);
+
         final RectF startRect = new RectF(0, 0, mDeviceProfile.widthPx, mDeviceProfile.heightPx);
         RectFSpringAnim anim = new RectFSpringAnim(startRect, targetRect, mLauncher,
                 mDeviceProfile);
@@ -1372,6 +1374,7 @@ public class QuickstepTransitionManager implements OnDeviceProfileChangeListener
             anim.addAnimatorListener(floatingIconView);
             floatingIconView.setOnTargetChangeListener(anim::onTargetPositionChanged);
             floatingIconView.setFastFinishRunnable(anim::end);
+            floatingIconView.setPageShiftX(pageRide::getShiftX);
             FloatingIconView finalFloatingIconView = floatingIconView;
 
             // We want the window alpha to be 0 once this threshold is met, so that the
@@ -1382,10 +1385,11 @@ public class QuickstepTransitionManager implements OnDeviceProfileChangeListener
                     windowTargetBounds) {
                 @Override
                 public void onUpdate(RectF currentRectF, float progress) {
-                    finalFloatingIconView.update(1f, 255 /* fgAlpha */, currentRectF, progress,
+                    RectF rect = pageRide.apply(currentRectF);
+                    finalFloatingIconView.update(1f, 255 /* fgAlpha */, rect, progress,
                             windowAlphaThreshold, getCornerRadius(progress), false);
 
-                    super.onUpdate(currentRectF, progress);
+                    super.onUpdate(rect, progress);
                 }
             };
             anim.addOnUpdateListener(runner);
@@ -1400,14 +1404,15 @@ public class QuickstepTransitionManager implements OnDeviceProfileChangeListener
                     windowTargetBounds) {
                 @Override
                 public void onUpdate(RectF currentRectF, float progress) {
+                    RectF rect = pageRide.apply(currentRectF);
                     final float fallbackBackgroundAlpha =
                             1 - mapBoundToRange(progress, 0.8f, 1, 0, 1, EXAGGERATED_EASE);
                     final float foregroundAlpha =
                             mapBoundToRange(progress, 0.5f, 1, 0, 1, EXAGGERATED_EASE);
-                    finalFloatingWidget.update(currentRectF, floatingWidgetAlpha, foregroundAlpha,
+                    finalFloatingWidget.update(rect, floatingWidgetAlpha, foregroundAlpha,
                             fallbackBackgroundAlpha, 1 - progress);
 
-                    super.onUpdate(currentRectF, progress);
+                    super.onUpdate(rect, progress);
                 }
             };
             anim.addOnUpdateListener(runner);
@@ -1420,6 +1425,49 @@ public class QuickstepTransitionManager implements OnDeviceProfileChangeListener
                 anim.start(mLauncher, velocityPxPerS);
             }
         });
+    }
+
+    /**
+     * Makes a closing animation move sideways together with the workspace page that holds the icon
+     * it is closing into, as if the closing app were part of that page. The animation itself is
+     * unchanged; its rect is only shifted by how far the page has scrolled since it was created.
+     * Icons that are not on a workspace page (Hotseat, All Apps, folders) never shift.
+     */
+    private static class PageRide {
+        @Nullable
+        private final Workspace mWorkspace;
+        private final int mStartScrollX;
+        private final RectF mShifted = new RectF();
+
+        PageRide(Launcher launcher, @Nullable View icon) {
+            Workspace workspace = null;
+            if (icon != null) {
+                for (ViewParent p = icon.getParent(); p != null; p = p.getParent()) {
+                    if (p == launcher.getWorkspace()) {
+                        workspace = launcher.getWorkspace();
+                        break;
+                    }
+                }
+            }
+            mWorkspace = workspace;
+            mStartScrollX = workspace == null ? 0 : workspace.getScrollX();
+        }
+
+        /** Distance in px (positive is right) the page has moved since this was created. */
+        double getShiftX() {
+            return mWorkspace == null ? 0 : mStartScrollX - mWorkspace.getScrollX();
+        }
+
+        /** Returns {@code rect} moved along with the page. */
+        RectF apply(RectF rect) {
+            float shift = (float) getShiftX();
+            if (shift == 0) {
+                return rect;
+            }
+            mShifted.set(rect);
+            mShifted.offset(shift, 0);
+            return mShifted;
+        }
     }
 
     /**
@@ -1584,7 +1632,6 @@ public class QuickstepTransitionManager implements OnDeviceProfileChangeListener
             }
 
             AnimatorSet anim = null;
-            boolean targetsHotseat = false;
             RemoteAnimationProvider provider = mRemoteAnimationProvider;
             if (provider != null) {
                 anim = provider.createWindowAnimation(appTargets, wallpaperTargets);
@@ -1612,7 +1659,6 @@ public class QuickstepTransitionManager implements OnDeviceProfileChangeListener
                             .getDimension(R.dimen.unlock_staggered_velocity_dp_per_s);
                     PointF velocity = new PointF(0, -velocityPxPerS);
                     getClosingWindowAnimators(anim, appTargets, launcherView, velocity);
-                    targetsHotseat = isInHotseat(launcherView);
                     if (!mLauncher.isInState(LauncherState.ALL_APPS)) {
                         anim.play(new StaggeredWorkspaceAnim(mLauncher, velocity.y,
                                 true /* animateOverviewScrim */, launcherView).getAnimators());
@@ -1662,12 +1708,10 @@ public class QuickstepTransitionManager implements OnDeviceProfileChangeListener
 
             mLauncher.clearForceInvisibleFlag(INVISIBLE_ALL);
             if (!mFromUnlock) {
-                final boolean closingToHotseat = targetsHotseat;
                 anim.addListener(new AnimatorListenerAdapter() {
                     @Override
                     public void onAnimationStart(Animator animation) {
                         mIsHomeCloseAnimationRunning = true;
-                        mHomeCloseAnimationTargetsHotseat = closingToHotseat;
                     }
 
                     @Override
@@ -1693,30 +1737,8 @@ public class QuickstepTransitionManager implements OnDeviceProfileChangeListener
         return true;
     }
 
-    /**
-     * Returns true while a close-to-home animation is running whose target icon is in the Hotseat.
-     * The Hotseat is the same on every workspace page, so the workspace can change page under this
-     * animation without affecting it.
-     */
-    public boolean isHomeCloseAnimationTargetingHotseat() {
-        return mIsHomeCloseAnimationRunning && mHomeCloseAnimationTargetsHotseat;
-    }
-
-    private static boolean isInHotseat(@Nullable View view) {
-        if (view == null) {
-            return false;
-        }
-        for (ViewParent parent = view.getParent(); parent != null; parent = parent.getParent()) {
-            if (parent instanceof Hotseat) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     private void onHomeCloseAnimationEnd() {
         mIsHomeCloseAnimationRunning = false;
-        mHomeCloseAnimationTargetsHotseat = false;
         Runnable task = mAfterHomeCloseAnimation;
         mAfterHomeCloseAnimation = null;
         if (task != null) {

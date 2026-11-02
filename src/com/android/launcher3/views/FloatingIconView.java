@@ -59,6 +59,8 @@ import com.android.launcher3.model.data.ItemInfoWithIcon;
 import com.android.launcher3.popup.SystemShortcut;
 import com.android.launcher3.shortcuts.DeepShortcutView;
 
+import java.util.function.DoubleSupplier;
+
 /**
  * A view that is created to look like another view with the purpose of creating fluid animations.
  */
@@ -103,6 +105,9 @@ public class FloatingIconView extends FrameLayout implements
     private Runnable mFastFinishRunnable;
 
     private float mIconOffsetY;
+    /** How far the page holding the original icon has moved since the animation was created. */
+    @Nullable
+    private DoubleSupplier mPageShiftX;
 
     public FloatingIconView(Context context) {
         this(context, null);
@@ -496,7 +501,10 @@ public class FloatingIconView extends FrameLayout implements
     public void onGlobalLayout() {
         if (mOriginalIcon != null && mOriginalIcon.isAttachedToWindow() && mPositionOut != null) {
             getLocationBoundsForView(mLauncher, mOriginalIcon, mIsOpening, sTmpRectF);
-            sTmpRectF.offset(0, mIconOffsetY);
+            // The animation rides along with a moving page, so only a change of the icon's place
+            // on its page (not the page moving) is a new target.
+            sTmpRectF.offset(mPageShiftX == null ? 0 : (float) -mPageShiftX.getAsDouble(),
+                    mIconOffsetY);
             if (!sTmpRectF.equals(mPositionOut)) {
                 updatePosition(sTmpRectF, (InsettableFrameLayout.LayoutParams) getLayoutParams());
                 if (mOnTargetChangeRunnable != null) {
@@ -508,6 +516,14 @@ public class FloatingIconView extends FrameLayout implements
 
     public void setOnTargetChangeListener(Runnable onTargetChangeListener) {
         mOnTargetChangeRunnable = onTargetChangeListener;
+    }
+
+    /**
+     * Sets how far (in px, positive is right) the page holding the original icon has moved since
+     * the animation was created. Page movement is not treated as a target change.
+     */
+    public void setPageShiftX(@Nullable DoubleSupplier pageShiftX) {
+        mPageShiftX = pageShiftX;
     }
 
     /**
@@ -645,6 +661,7 @@ public class FloatingIconView extends FrameLayout implements
         mListenerView.setListener(null);
         mOriginalIcon = null;
         mOnTargetChangeRunnable = null;
+        mPageShiftX = null;
         mBadge = null;
         sTmpObjArray[0] = null;
         sRecycledFetchIconId = sFetchIconId;
