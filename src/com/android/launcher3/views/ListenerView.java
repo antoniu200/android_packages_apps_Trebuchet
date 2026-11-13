@@ -72,9 +72,7 @@ public class ListenerView extends AbstractFloatingView {
 
     @Override
     public boolean onControllerInterceptTouchEvent(MotionEvent ev) {
-        if (ev.getAction() == MotionEvent.ACTION_DOWN) {
-            handleClose(false);
-        }
+        // No action: animation rides the page
         // We want other views to be able to intercept the touch so we return false here.
         return false;
     }
